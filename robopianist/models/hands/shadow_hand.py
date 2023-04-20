@@ -50,41 +50,39 @@ _FOREARM_DOFS: Dict[str, Dof] = {
     "forearm_ty": Dof(
         joint_type="slide", axis=(0, 0, 1), stiffness=300, joint_range=(0.0, 0.06)
     ),
-    # "forearm_tz": Dof(
-    #     joint_type="slide", axis=(0, 1, 0), stiffness=1000, joint_range=(-0.04, 0.0)
-    # ),
-    # "forearm_roll": Dof(
-    #     joint_type="hinge", axis=(0, 0, 1), stiffness=300, joint_range=(-0.25, 0.25)
-    # ),
-    # "forearm_pitch": Dof(
-    #     joint_type="hinge", axis=(1, 0, 0), stiffness=50, joint_range=(0, 0.15)
-    # ),
-    # "forearm_yaw": Dof(
-    #     joint_type="hinge",
-    #     axis=(0, -1, 0),
-    #     stiffness=300,
-    #     joint_range=(-0.25, 0.25),
-    #     reflect=True,
-    # ),
+    "forearm_tz": Dof(
+        joint_type="slide", axis=(0, 1, 0), stiffness=1000, joint_range=(-0.04, 0.0)
+    ),
+    "forearm_roll": Dof(
+        joint_type="hinge", axis=(0, 0, 1), stiffness=300, joint_range=(-0.25, 0.25)
+    ),
+    "forearm_pitch": Dof(
+        joint_type="hinge", axis=(1, 0, 0), stiffness=50, joint_range=(0, 0.15)
+    ),
+    "forearm_yaw": Dof(
+        joint_type="hinge",
+        axis=(0, -1, 0),
+        stiffness=300,
+        joint_range=(-0.25, 0.25),
+        reflect=True,
+    ),
 }
 
 _RESTRICTED_WRJ2_RANGE: Tuple[float, float] = (-0.174533, 0.174533)
 
 _REDUCED_ACTION_SPACE_EXCLUDED_DOFS: Tuple[str, ...] = (
     "A_THJ5",
-    "A_THJ3",
     "A_THJ1",
-    "A_FFJ4",
-    "A_MFJ4",
-    "A_RFJ4",
     "A_LFJ5",
-    "A_LFJ4",
 )
 
 _REDUCED_THUMB_RANGE: Tuple[float, float] = (0.0, 0.698132)
 
 _FINGERTIP_OFFSET = 0.026
 _THUMBTIP_OFFSET = 0.0275
+
+# Which dofs to add to the forearm.
+_DEFAULT_FOREARM_DOFS = ("forearm_tx", "forearm_ty")
 
 
 class ShadowHand(base.Hand):
@@ -96,8 +94,8 @@ class ShadowHand(base.Hand):
         side: base.HandSide = base.HandSide.RIGHT,
         primitive_fingertip_collisions: bool = False,
         restrict_wrist_yaw_range: bool = False,
-        add_dofs: bool = True,
         reduced_action_space: bool = False,
+        forearm_dofs: Sequence[str] = _DEFAULT_FOREARM_DOFS,
     ) -> None:
         """Initializes a ShadowHand.
 
@@ -109,8 +107,8 @@ class ShadowHand(base.Hand):
                 speeds up the simulation.
             restrict_wrist_yaw_range: Whether to restrict the range of the wrist yaw
                 joint.
-            add_dofs: Whether to add the forearm degrees of freedom.
             reduced_action_space: Whether to use a reduced action space.
+            forearm_dofs: Which dofs to add to the forearm.
         """
         if side == base.HandSide.RIGHT:
             self._prefix = "rh_"
@@ -125,6 +123,7 @@ class ShadowHand(base.Hand):
         self._mjcf_root.model = name
         self._n_forearm_dofs = 0
         self._reduce_action_space = reduced_action_space
+        self._forearm_dofs = forearm_dofs
 
         if restrict_wrist_yaw_range:
             joint = mjcf_utils.safe_find(
@@ -137,8 +136,7 @@ class ShadowHand(base.Hand):
             actuator.ctrlrange = _RESTRICTED_WRJ2_RANGE
 
         # Important: call before parsing.
-        if add_dofs:
-            self._add_dofs()
+        self._add_dofs()
 
         self._parse_mjcf_elements()
         self._add_mjcf_elements()
@@ -162,11 +160,14 @@ class ShadowHand(base.Hand):
         joints = mjcf_utils.safe_find_all(self._mjcf_root, "joint")
         actuators = mjcf_utils.safe_find_all(self._mjcf_root, "actuator")
         if self._reduce_action_space:
-            # Disable some actuators (keeping the joints).
+            # Disable some actuators.
             for act_name in _REDUCED_ACTION_SPACE_EXCLUDED_DOFS:
                 act = [a for a in actuators if a.name == self._prefix + act_name][0]
                 actuators.remove(act)
                 act.remove()
+                jnt = [j for j in joints if j.name == self._prefix + act_name[2:]][0]
+                joints.remove(jnt)
+                jnt.remove()
             # Reduce THJ2 range.
             joint = mjcf_utils.safe_find(
                 self._mjcf_root, "joint", self._prefix + "THJ2"
@@ -250,7 +251,15 @@ class ShadowHand(base.Hand):
                 return tuple([-a for a in axis])
             return axis
 
-        for dof_name, dof in _FOREARM_DOFS.items():
+        for dof_name in self._forearm_dofs:
+            if dof_name not in _FOREARM_DOFS:
+                raise ValueError(
+                    f"Invalid forearm DOF: {dof_name}. Valid DOFs are: "
+                    f"{_FOREARM_DOFS}."
+                )
+
+            dof = _FOREARM_DOFS[dof_name]
+
             joint = self.root_body.add(
                 "joint",
                 type=dof.joint_type,
@@ -344,20 +353,6 @@ class ShadowHand(base.Hand):
     ) -> None:
         del random_state  # Unused.
         physics.bind(self.actuators).ctrl = action
-
-    def initialize_episode(
-        self, physics: mjcf.Physics, random_state: np.random.RandomState
-    ) -> None:
-        del random_state  # Unused.
-        if self._reduce_action_space:
-            physics.bind([self.joints[i] for i in self._disabled_idxs]).qpos = 0.0
-
-    def after_step(
-        self, physics: mjcf.Physics, random_state: np.random.RandomState
-    ) -> None:
-        del random_state  # Unused.
-        if self._reduce_action_space:
-            physics.bind([self.joints[i] for i in self._disabled_idxs]).qpos = 0.0
 
 
 class ShadowHandObservables(base.HandObservables):
